@@ -7,6 +7,6 @@ RUN pip install --no-cache-dir \
 
 COPY handler.py /handler.py
 
-RUN python -c "import runpod; from llama_cpp import Llama; print('OK')"
+RUN python3 -c "import runpod; from llama_cpp import Llama; print('OK')"
 
-CMD ["python", "-u", "/handler.py"]
+CMD ["python3", "-u", "/handler.py"]
