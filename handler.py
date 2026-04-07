@@ -8,11 +8,13 @@ import runpod
 
 OLLAMA_HOST = "http://127.0.0.1:11434"
 MODEL_NAME = os.environ.get("MODEL_NAME", "norsk-mistral")
+GGUF_PATH = "/runpod-volume/models/norsk-mistral-119b-gguf/m51Lab-NorskMistral-119B-Q4_K_M.gguf"
+MODELFILE_PATH = "/tmp/Modelfile"
 
 
 def wait_for_ollama():
     """Wait for Ollama server to be ready."""
-    for _ in range(60):
+    for _ in range(120):
         try:
             r = requests.get(f"{OLLAMA_HOST}/", timeout=2)
             if r.status_code == 200:
@@ -23,7 +25,49 @@ def wait_for_ollama():
     return False
 
 
-# Start Ollama server on module load
+def ensure_model():
+    """Create model from GGUF if not already available."""
+    try:
+        tags = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=10).json()
+        models = [m["name"] for m in tags.get("models", [])]
+        print(f"Available models: {models}")
+
+        if any(MODEL_NAME in m for m in models):
+            print(f"Model {MODEL_NAME} already available.")
+            return True
+    except Exception as e:
+        print(f"Failed to check models: {e}")
+
+    # Model not found - create from GGUF
+    if not os.path.exists(GGUF_PATH):
+        print(f"ERROR: GGUF file not found at {GGUF_PATH}")
+        # List what's on the volume
+        for root, dirs, files in os.walk("/runpod-volume"):
+            for f in files:
+                print(f"  {os.path.join(root, f)}")
+            if root.count(os.sep) > 3:
+                break
+        return False
+
+    print(f"Creating model from {GGUF_PATH}...")
+    with open(MODELFILE_PATH, "w") as f:
+        f.write(f"FROM {GGUF_PATH}\n")
+
+    result = subprocess.run(
+        ["ollama", "create", MODEL_NAME, "-f", MODELFILE_PATH],
+        capture_output=True, text=True, timeout=600,
+        env={**os.environ, "OLLAMA_HOST": OLLAMA_HOST},
+    )
+    print(f"ollama create stdout: {result.stdout}")
+    if result.returncode != 0:
+        print(f"ollama create stderr: {result.stderr}")
+        return False
+
+    print(f"Model {MODEL_NAME} created successfully.")
+    return True
+
+
+# Start Ollama server
 subprocess.Popen(
     ["ollama", "serve"],
     env={**os.environ, "OLLAMA_HOST": "0.0.0.0:11434"},
@@ -32,15 +76,12 @@ subprocess.Popen(
 if not wait_for_ollama():
     raise RuntimeError("Ollama server failed to start")
 
-# Check available models
-try:
-    tags = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=10).json()
-    models = [m["name"] for m in tags.get("models", [])]
-    print(f"Available models: {models}")
-except Exception as e:
-    print(f"Failed to list models: {e}")
+print("Ollama server ready.")
 
-print(f"Ollama ready. Model: {MODEL_NAME}")
+if not ensure_model():
+    print("WARNING: Model not available. Requests will fail.")
+
+print(f"Worker ready. Model: {MODEL_NAME}")
 
 
 def handler(job):
