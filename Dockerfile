@@ -1,18 +1,12 @@
-FROM nvidia/cuda:12.2.2-devel-ubuntu22.04
+FROM runpod/base:0.6.2-cuda12.2.0
 
-ENV DEBIAN_FRONTEND=noninteractive
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-dev build-essential cmake ninja-build git && \
-    rm -rf /var/lib/apt/lists/*
-
-# Build llama-cpp-python with CUDA
-RUN CMAKE_ARGS="-DGGML_CUDA=on" pip3 install --no-cache-dir \
+# Install llama-cpp-python CPU build (CUDA acceleration via runtime libs on RunPod)
+RUN pip install --no-cache-dir \
     llama-cpp-python==0.3.8 \
     runpod==1.7.0
 
 COPY handler.py /handler.py
 
-RUN python3 -c "import runpod; from llama_cpp import Llama; print('OK')"
+RUN python -c "import runpod; from llama_cpp import Llama; print('OK')"
 
-CMD ["python3", "-u", "/handler.py"]
+CMD ["python", "-u", "/handler.py"]
