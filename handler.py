@@ -1,4 +1,4 @@
-"""RunPod serverless handler for NorskMistral via llama-server (llama.cpp)."""
+"""RunPod serverless handler for NorskMistral via Ollama."""
 
 import os
 import subprocess
@@ -6,65 +6,84 @@ import time
 import requests
 import runpod
 
-LLAMA_HOST = "http://127.0.0.1:8080"
+OLLAMA_HOST = "http://127.0.0.1:11434"
+MODEL_NAME = os.environ.get("MODEL_NAME", "norsk-mistral")
 GGUF_PATH = "/runpod-volume/models/norsk-mistral-119b-gguf/m51Lab-NorskMistral-119B-Q4_K_M.gguf"
 
 
-def start_llama_server():
-    """Start llama-server with the GGUF model."""
-    if not os.path.exists(GGUF_PATH):
-        print(f"ERROR: GGUF not found at {GGUF_PATH}")
-        for root, dirs, files in os.walk("/runpod-volume", topdown=True):
-            for f in files:
-                print(f"  {os.path.join(root, f)}")
-            if root.count(os.sep) > 4:
-                dirs.clear()
-        raise RuntimeError(f"Model not found: {GGUF_PATH}")
-
-    print(f"Starting llama-server with {GGUF_PATH}...")
-    proc = subprocess.Popen(
-        [
-            "llama-server",
-            "-m", GGUF_PATH,
-            "--host", "0.0.0.0",
-            "--port", "8080",
-            "-ngl", "99",
-            "-c", "4096",
-            "-fa",
-        ],
-    )
-    return proc
-
-
-def wait_for_server():
-    """Wait for llama-server to be ready."""
-    for i in range(300):  # Up to 5 min for model loading
+def wait_for_ollama():
+    for _ in range(120):
         try:
-            r = requests.get(f"{LLAMA_HOST}/health", timeout=2)
+            r = requests.get(f"{OLLAMA_HOST}/", timeout=2)
             if r.status_code == 200:
-                data = r.json()
-                if data.get("status") == "ok":
-                    return True
+                return True
         except Exception:
             pass
-        if i % 30 == 0 and i > 0:
-            print(f"Still waiting for model to load... ({i}s)")
         time.sleep(1)
     return False
 
 
-# Start server on module load
-server_proc = start_llama_server()
+def ensure_model():
+    """Create model from GGUF if needed."""
+    tags = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=10).json()
+    models = [m["name"] for m in tags.get("models", [])]
+    print(f"Models: {models}")
 
-print("Waiting for model to load into GPU memory...")
-if not wait_for_server():
-    raise RuntimeError("llama-server failed to start or load model")
+    if any(MODEL_NAME in m for m in models):
+        # Test that the model actually loads
+        try:
+            r = requests.post(f"{OLLAMA_HOST}/api/generate",
+                json={"model": MODEL_NAME, "prompt": "test", "stream": False,
+                      "options": {"num_predict": 1}}, timeout=120)
+            if r.status_code == 200:
+                print(f"Model {MODEL_NAME} verified OK.")
+                return True
+            print(f"Model exists but failed to load ({r.status_code}), re-creating...")
+            requests.delete(f"{OLLAMA_HOST}/api/delete", json={"name": MODEL_NAME}, timeout=30)
+        except Exception as e:
+            print(f"Model test failed: {e}, re-creating...")
+            requests.delete(f"{OLLAMA_HOST}/api/delete", json={"name": MODEL_NAME}, timeout=30)
 
-print("llama-server ready!")
+    if not os.path.exists(GGUF_PATH):
+        print(f"ERROR: GGUF not found at {GGUF_PATH}")
+        return False
+
+    print(f"Creating model from {GGUF_PATH}...")
+    modelfile = f"FROM {GGUF_PATH}\n"
+    with open("/tmp/Modelfile", "w") as f:
+        f.write(modelfile)
+
+    result = subprocess.run(
+        ["ollama", "create", MODEL_NAME, "-f", "/tmp/Modelfile"],
+        capture_output=True, text=True, timeout=600,
+        env={**os.environ, "OLLAMA_HOST": OLLAMA_HOST},
+    )
+    print(f"Create output: {result.stdout}")
+    if result.returncode != 0:
+        print(f"Create error: {result.stderr}")
+        return False
+
+    print(f"Model {MODEL_NAME} created.")
+    return True
+
+
+# Start Ollama
+subprocess.Popen(
+    ["ollama", "serve"],
+    env={**os.environ, "OLLAMA_HOST": "0.0.0.0:11434"},
+)
+
+if not wait_for_ollama():
+    raise RuntimeError("Ollama failed to start")
+
+print(f"Ollama ready. Ensuring model...")
+if not ensure_model():
+    print("WARNING: Model setup failed.")
+
+print("Worker ready.")
 
 
 def handler(job):
-    """Handle inference request via OpenAI-compatible API."""
     inp = job["input"]
     prompt = inp.get("prompt", "")
     temperature = inp.get("temperature", 0.7)
@@ -72,34 +91,30 @@ def handler(job):
 
     try:
         resp = requests.post(
-            f"{LLAMA_HOST}/v1/chat/completions",
+            f"{OLLAMA_HOST}/api/generate",
             json={
-                "model": "norsk-mistral",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": num_predict,
-                "temperature": temperature,
+                "model": MODEL_NAME,
+                "prompt": prompt,
                 "stream": False,
+                "options": {
+                    "temperature": temperature,
+                    "num_predict": num_predict,
+                },
             },
             timeout=300,
         )
 
         if resp.status_code != 200:
-            error_text = resp.text[:500]
-            print(f"llama-server error {resp.status_code}: {error_text}")
-            return {"error": f"Server error {resp.status_code}: {error_text}"}
+            return {"error": f"Ollama {resp.status_code}: {resp.text[:500]}"}
 
         data = resp.json()
-        choice = data.get("choices", [{}])[0]
-        message = choice.get("message", {})
-        usage = data.get("usage", {})
-
         return {
-            "response": message.get("content", ""),
-            "eval_count": usage.get("completion_tokens", 0),
-            "total_duration": 0,
+            "response": data.get("response", ""),
+            "eval_count": data.get("eval_count", 0),
+            "eval_duration": data.get("eval_duration", 0),
+            "total_duration": data.get("total_duration", 0),
         }
     except Exception as e:
-        print(f"Handler error: {e}")
         return {"error": str(e)}
 
 
