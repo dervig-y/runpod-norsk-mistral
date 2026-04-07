@@ -27,12 +27,18 @@ def wait_for_ollama():
 subprocess.Popen(
     ["ollama", "serve"],
     env={**os.environ, "OLLAMA_HOST": "0.0.0.0:11434"},
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL,
 )
 
 if not wait_for_ollama():
     raise RuntimeError("Ollama server failed to start")
+
+# Check available models
+try:
+    tags = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=10).json()
+    models = [m["name"] for m in tags.get("models", [])]
+    print(f"Available models: {models}")
+except Exception as e:
+    print(f"Failed to list models: {e}")
 
 print(f"Ollama ready. Model: {MODEL_NAME}")
 
@@ -58,7 +64,12 @@ def handler(job):
             },
             timeout=300,
         )
-        resp.raise_for_status()
+
+        if resp.status_code != 200:
+            error_text = resp.text[:500]
+            print(f"Ollama error {resp.status_code}: {error_text}")
+            return {"error": f"Ollama {resp.status_code}: {error_text}"}
+
         data = resp.json()
         return {
             "response": data.get("response", ""),
@@ -67,6 +78,7 @@ def handler(job):
             "total_duration": data.get("total_duration", 0),
         }
     except Exception as e:
+        print(f"Handler error: {e}")
         return {"error": str(e)}
 
 
