@@ -24,46 +24,35 @@ def wait_for_ollama():
 
 
 def ensure_model():
-    """Create model from GGUF if needed."""
+    """Check model exists. Only create from GGUF if missing (first-time setup)."""
     tags = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=10).json()
     models = [m["name"] for m in tags.get("models", [])]
-    print(f"Models: {models}")
+    print(f"Models on volume: {models}")
 
     if any(MODEL_NAME in m for m in models):
-        # Test that the model actually loads
-        try:
-            r = requests.post(f"{OLLAMA_HOST}/api/generate",
-                json={"model": MODEL_NAME, "prompt": "test", "stream": False,
-                      "options": {"num_predict": 1}}, timeout=120)
-            if r.status_code == 200:
-                print(f"Model {MODEL_NAME} verified OK.")
-                return True
-            print(f"Model exists but failed to load ({r.status_code}), re-creating...")
-            requests.delete(f"{OLLAMA_HOST}/api/delete", json={"name": MODEL_NAME}, timeout=30)
-        except Exception as e:
-            print(f"Model test failed: {e}, re-creating...")
-            requests.delete(f"{OLLAMA_HOST}/api/delete", json={"name": MODEL_NAME}, timeout=30)
+        print(f"Model {MODEL_NAME} found. Ready.")
+        return True
 
+    # Model not found - create from GGUF (one-time setup, takes ~10 min)
     if not os.path.exists(GGUF_PATH):
         print(f"ERROR: GGUF not found at {GGUF_PATH}")
         return False
 
-    print(f"Creating model from {GGUF_PATH}...")
-    modelfile = f"FROM {GGUF_PATH}\n"
+    print(f"First-time setup: creating model from {GGUF_PATH}...")
     with open("/tmp/Modelfile", "w") as f:
-        f.write(modelfile)
+        f.write(f"FROM {GGUF_PATH}\n")
 
     result = subprocess.run(
         ["ollama", "create", MODEL_NAME, "-f", "/tmp/Modelfile"],
-        capture_output=True, text=True, timeout=600,
+        capture_output=True, text=True, timeout=900,
         env={**os.environ, "OLLAMA_HOST": OLLAMA_HOST},
     )
-    print(f"Create output: {result.stdout}")
+    print(f"Create: {result.stdout}")
     if result.returncode != 0:
         print(f"Create error: {result.stderr}")
         return False
 
-    print(f"Model {MODEL_NAME} created.")
+    print(f"Model {MODEL_NAME} created. Future startups will be fast.")
     return True
 
 
@@ -76,9 +65,9 @@ subprocess.Popen(
 if not wait_for_ollama():
     raise RuntimeError("Ollama failed to start")
 
-print(f"Ollama ready. Ensuring model...")
+print("Ollama ready.")
 if not ensure_model():
-    print("WARNING: Model setup failed.")
+    print("WARNING: Model not available.")
 
 print("Worker ready.")
 
