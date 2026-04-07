@@ -26,17 +26,18 @@ def wait_for_ollama():
 
 
 def ensure_model():
-    """Create model from GGUF if not already available."""
+    """Create model from GGUF. Always re-create to avoid version mismatch."""
     try:
         tags = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=10).json()
         models = [m["name"] for m in tags.get("models", [])]
-        print(f"Available models: {models}")
+        print(f"Existing models: {models}")
 
+        # Delete old model to force re-create with current Ollama version
         if any(MODEL_NAME in m for m in models):
-            print(f"Model {MODEL_NAME} already available.")
-            return True
+            print(f"Deleting old model {MODEL_NAME} to re-create with current version...")
+            requests.delete(f"{OLLAMA_HOST}/api/delete", json={"name": MODEL_NAME}, timeout=30)
     except Exception as e:
-        print(f"Failed to check models: {e}")
+        print(f"Failed to check/delete models: {e}")
 
     # Model not found - create from GGUF
     if not os.path.exists(GGUF_PATH):
