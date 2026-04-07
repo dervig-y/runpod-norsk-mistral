@@ -1,49 +1,73 @@
-"""RunPod serverless handler for NorskMistral-119B GGUF inference."""
+"""RunPod serverless handler for NorskMistral via Ollama."""
 
+import os
+import subprocess
+import time
+import requests
 import runpod
-from llama_cpp import Llama
 
-llm = None
-MODEL_PATH = "/runpod-volume/models/norsk-mistral-119b-gguf/m51Lab-NorskMistral-119B-Q4_K_M.gguf"
+OLLAMA_HOST = "http://127.0.0.1:11434"
+MODEL_NAME = os.environ.get("MODEL_NAME", "norsk-mistral")
 
 
-def load_model():
-    global llm
-    if llm is None:
-        print(f"Loading model from {MODEL_PATH}...")
-        llm = Llama(
-            model_path=MODEL_PATH,
-            n_gpu_layers=-1,
-            n_ctx=4096,
-            verbose=False,
-        )
-        print("Model loaded.")
-    return llm
+def wait_for_ollama():
+    """Wait for Ollama server to be ready."""
+    for _ in range(60):
+        try:
+            r = requests.get(f"{OLLAMA_HOST}/", timeout=2)
+            if r.status_code == 200:
+                return True
+        except Exception:
+            pass
+        time.sleep(1)
+    return False
+
+
+# Start Ollama server on module load
+subprocess.Popen(
+    ["ollama", "serve"],
+    env={**os.environ, "OLLAMA_HOST": "0.0.0.0:11434"},
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+
+if not wait_for_ollama():
+    raise RuntimeError("Ollama server failed to start")
+
+print(f"Ollama ready. Model: {MODEL_NAME}")
 
 
 def handler(job):
-    """RunPod serverless handler - yields streaming tokens."""
-    model = load_model()
+    """Handle inference request."""
     inp = job["input"]
-
-    messages = inp.get("messages", [])
-    max_tokens = min(inp.get("max_tokens", 1024), 2048)
+    prompt = inp.get("prompt", "")
     temperature = inp.get("temperature", 0.7)
+    num_predict = inp.get("num_predict", 1024)
 
-    stream = model.create_chat_completion(
-        messages=messages,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        stream=True,
-    )
+    try:
+        resp = requests.post(
+            f"{OLLAMA_HOST}/api/generate",
+            json={
+                "model": MODEL_NAME,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": temperature,
+                    "num_predict": num_predict,
+                },
+            },
+            timeout=300,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return {
+            "response": data.get("response", ""),
+            "eval_count": data.get("eval_count", 0),
+            "eval_duration": data.get("eval_duration", 0),
+            "total_duration": data.get("total_duration", 0),
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
-    for chunk in stream:
-        choices = chunk.get("choices", [])
-        if choices:
-            delta = choices[0].get("delta", {})
-            content = delta.get("content", "")
-            if content:
-                yield {"token": content}
 
-
-runpod.serverless.start({"handler": handler, "return_aggregate_stream": True})
+runpod.serverless.start({"handler": handler})

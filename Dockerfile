@@ -1,8 +1,9 @@
-FROM runpod/base:0.6.2-cuda12.2.0
+FROM ollama/ollama
 
-RUN pip3 install --no-cache-dir \
-    llama-cpp-python==0.3.8 \
-    runpod==1.7.0
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --no-cache-dir runpod==1.7.0 requests
 
 COPY handler.py /handler.py
 
