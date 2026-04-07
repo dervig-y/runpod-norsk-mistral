@@ -9,10 +9,21 @@ import runpod
 GGUF_PATH = "/runpod-volume/models/norsk-mistral-119b-gguf/m51Lab-NorskMistral-119B-Q4_K_M.gguf"
 LLAMA_HOST = "http://127.0.0.1:8080"
 
-# Start llama-server (reads GGUF directly, no copying)
-print(f"Starting llama-server with {GGUF_PATH}...")
+# Find llama-server binary
+import shutil
+LLAMA_BIN = shutil.which("llama-server") or shutil.which("llama-server", path="/app:/usr/local/bin:/usr/bin:/bin")
+if not LLAMA_BIN:
+    # Search for it
+    result = subprocess.run(["find", "/", "-name", "llama-server", "-type", "f"], capture_output=True, text=True, timeout=10)
+    candidates = result.stdout.strip().split("\n")
+    LLAMA_BIN = candidates[0] if candidates[0] else None
+if not LLAMA_BIN:
+    raise RuntimeError("llama-server binary not found")
+
+print(f"Using llama-server at {LLAMA_BIN}")
+print(f"Starting with {GGUF_PATH}...")
 subprocess.Popen([
-    "llama-server",
+    LLAMA_BIN,
     "-m", GGUF_PATH,
     "--host", "0.0.0.0",
     "--port", "8080",
