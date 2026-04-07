@@ -1,4 +1,4 @@
-"""RunPod serverless handler for NorskMistral via Ollama."""
+"""RunPod serverless handler - llama-server reads GGUF directly from volume."""
 
 import os
 import subprocess
@@ -6,102 +6,60 @@ import time
 import requests
 import runpod
 
-OLLAMA_HOST = "http://127.0.0.1:11434"
-MODEL_NAME = os.environ.get("MODEL_NAME", "norsk-mistral")
 GGUF_PATH = "/runpod-volume/models/norsk-mistral-119b-gguf/m51Lab-NorskMistral-119B-Q4_K_M.gguf"
+LLAMA_HOST = "http://127.0.0.1:8080"
 
+# Start llama-server (reads GGUF directly, no copying)
+print(f"Starting llama-server with {GGUF_PATH}...")
+subprocess.Popen([
+    "llama-server",
+    "-m", GGUF_PATH,
+    "--host", "0.0.0.0",
+    "--port", "8080",
+    "-ngl", "99",
+    "-c", "4096",
+])
 
-def wait_for_ollama():
-    for _ in range(120):
-        try:
-            r = requests.get(f"{OLLAMA_HOST}/", timeout=2)
-            if r.status_code == 200:
-                return True
-        except Exception:
-            pass
-        time.sleep(1)
-    return False
-
-
-def ensure_model():
-    """Check model exists. Only create from GGUF if missing (first-time setup)."""
-    tags = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=10).json()
-    models = [m["name"] for m in tags.get("models", [])]
-    print(f"Models on volume: {models}")
-
-    if any(MODEL_NAME in m for m in models):
-        print(f"Model {MODEL_NAME} found. Ready.")
-        return True
-
-    # Model not found - create from GGUF (one-time setup, takes ~10 min)
-    if not os.path.exists(GGUF_PATH):
-        print(f"ERROR: GGUF not found at {GGUF_PATH}")
-        return False
-
-    print(f"First-time setup: creating model from {GGUF_PATH}...")
-    with open("/tmp/Modelfile", "w") as f:
-        f.write(f"FROM {GGUF_PATH}\n")
-
-    result = subprocess.run(
-        ["ollama", "create", MODEL_NAME, "-f", "/tmp/Modelfile"],
-        capture_output=True, text=True, timeout=900,
-        env={**os.environ, "OLLAMA_HOST": OLLAMA_HOST},
-    )
-    print(f"Create: {result.stdout}")
-    if result.returncode != 0:
-        print(f"Create error: {result.stderr}")
-        return False
-
-    print(f"Model {MODEL_NAME} created. Future startups will be fast.")
-    return True
-
-
-# Start Ollama
-subprocess.Popen(
-    ["ollama", "serve"],
-    env={**os.environ, "OLLAMA_HOST": "0.0.0.0:11434"},
-)
-
-if not wait_for_ollama():
-    raise RuntimeError("Ollama failed to start")
-
-print("Ollama ready.")
-if not ensure_model():
-    print("WARNING: Model not available.")
+# Wait for server to load model into GPU
+for i in range(300):
+    try:
+        r = requests.get(f"{LLAMA_HOST}/health", timeout=2)
+        if r.status_code == 200 and r.json().get("status") == "ok":
+            print(f"llama-server ready after {i}s")
+            break
+    except Exception:
+        pass
+    if i % 30 == 0 and i > 0:
+        print(f"Loading model... {i}s")
+    time.sleep(1)
+else:
+    raise RuntimeError("llama-server failed to start")
 
 print("Worker ready.")
 
 
 def handler(job):
     inp = job["input"]
-    prompt = inp.get("prompt", "")
-    temperature = inp.get("temperature", 0.7)
-    num_predict = inp.get("num_predict", 1024)
-
     try:
         resp = requests.post(
-            f"{OLLAMA_HOST}/api/generate",
+            f"{LLAMA_HOST}/v1/chat/completions",
             json={
-                "model": MODEL_NAME,
-                "prompt": prompt,
+                "messages": [{"role": "user", "content": inp.get("prompt", "")}],
+                "max_tokens": inp.get("num_predict", 1024),
+                "temperature": inp.get("temperature", 0.7),
                 "stream": False,
-                "options": {
-                    "temperature": temperature,
-                    "num_predict": num_predict,
-                },
             },
             timeout=300,
         )
-
         if resp.status_code != 200:
-            return {"error": f"Ollama {resp.status_code}: {resp.text[:500]}"}
+            return {"error": f"llama-server {resp.status_code}: {resp.text[:500]}"}
 
         data = resp.json()
+        choice = data.get("choices", [{}])[0]
+        usage = data.get("usage", {})
         return {
-            "response": data.get("response", ""),
-            "eval_count": data.get("eval_count", 0),
-            "eval_duration": data.get("eval_duration", 0),
-            "total_duration": data.get("total_duration", 0),
+            "response": choice.get("message", {}).get("content", ""),
+            "eval_count": usage.get("completion_tokens", 0),
         }
     except Exception as e:
         return {"error": str(e)}
