@@ -1,4 +1,4 @@
-"""RunPod serverless handler for NorskMistral via Ollama."""
+"""RunPod serverless handler for NorskMistral via llama-server (llama.cpp)."""
 
 import os
 import subprocess
@@ -6,87 +6,65 @@ import time
 import requests
 import runpod
 
-OLLAMA_HOST = "http://127.0.0.1:11434"
-MODEL_NAME = os.environ.get("MODEL_NAME", "norsk-mistral")
+LLAMA_HOST = "http://127.0.0.1:8080"
 GGUF_PATH = "/runpod-volume/models/norsk-mistral-119b-gguf/m51Lab-NorskMistral-119B-Q4_K_M.gguf"
-MODELFILE_PATH = "/tmp/Modelfile"
 
 
-def wait_for_ollama():
-    """Wait for Ollama server to be ready."""
-    for _ in range(120):
+def start_llama_server():
+    """Start llama-server with the GGUF model."""
+    if not os.path.exists(GGUF_PATH):
+        print(f"ERROR: GGUF not found at {GGUF_PATH}")
+        for root, dirs, files in os.walk("/runpod-volume", topdown=True):
+            for f in files:
+                print(f"  {os.path.join(root, f)}")
+            if root.count(os.sep) > 4:
+                dirs.clear()
+        raise RuntimeError(f"Model not found: {GGUF_PATH}")
+
+    print(f"Starting llama-server with {GGUF_PATH}...")
+    proc = subprocess.Popen(
+        [
+            "llama-server",
+            "-m", GGUF_PATH,
+            "--host", "0.0.0.0",
+            "--port", "8080",
+            "-ngl", "99",
+            "-c", "4096",
+            "-fa",
+        ],
+    )
+    return proc
+
+
+def wait_for_server():
+    """Wait for llama-server to be ready."""
+    for i in range(300):  # Up to 5 min for model loading
         try:
-            r = requests.get(f"{OLLAMA_HOST}/", timeout=2)
+            r = requests.get(f"{LLAMA_HOST}/health", timeout=2)
             if r.status_code == 200:
-                return True
+                data = r.json()
+                if data.get("status") == "ok":
+                    return True
         except Exception:
             pass
+        if i % 30 == 0 and i > 0:
+            print(f"Still waiting for model to load... ({i}s)")
         time.sleep(1)
     return False
 
 
-def ensure_model():
-    """Create model from GGUF. Always re-create to avoid version mismatch."""
-    try:
-        tags = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=10).json()
-        models = [m["name"] for m in tags.get("models", [])]
-        print(f"Existing models: {models}")
+# Start server on module load
+server_proc = start_llama_server()
 
-        # Delete old model to force re-create with current Ollama version
-        if any(MODEL_NAME in m for m in models):
-            print(f"Deleting old model {MODEL_NAME} to re-create with current version...")
-            requests.delete(f"{OLLAMA_HOST}/api/delete", json={"name": MODEL_NAME}, timeout=30)
-    except Exception as e:
-        print(f"Failed to check/delete models: {e}")
+print("Waiting for model to load into GPU memory...")
+if not wait_for_server():
+    raise RuntimeError("llama-server failed to start or load model")
 
-    # Model not found - create from GGUF
-    if not os.path.exists(GGUF_PATH):
-        print(f"ERROR: GGUF file not found at {GGUF_PATH}")
-        # List what's on the volume
-        for root, dirs, files in os.walk("/runpod-volume"):
-            for f in files:
-                print(f"  {os.path.join(root, f)}")
-            if root.count(os.sep) > 3:
-                break
-        return False
-
-    print(f"Creating model from {GGUF_PATH}...")
-    with open(MODELFILE_PATH, "w") as f:
-        f.write(f"FROM {GGUF_PATH}\n")
-
-    result = subprocess.run(
-        ["ollama", "create", MODEL_NAME, "-f", MODELFILE_PATH],
-        capture_output=True, text=True, timeout=600,
-        env={**os.environ, "OLLAMA_HOST": OLLAMA_HOST},
-    )
-    print(f"ollama create stdout: {result.stdout}")
-    if result.returncode != 0:
-        print(f"ollama create stderr: {result.stderr}")
-        return False
-
-    print(f"Model {MODEL_NAME} created successfully.")
-    return True
-
-
-# Start Ollama server
-subprocess.Popen(
-    ["ollama", "serve"],
-    env={**os.environ, "OLLAMA_HOST": "0.0.0.0:11434"},
-)
-
-if not wait_for_ollama():
-    raise RuntimeError("Ollama server failed to start")
-
-print("Ollama server ready.")
-
-if not ensure_model():
-    print("WARNING: Model not available. Requests will fail.")
-
-print(f"Worker ready. Model: {MODEL_NAME}")
+print("llama-server ready!")
 
 
 def handler(job):
-    """Handle inference request."""
+    """Handle inference request via OpenAI-compatible API."""
     inp = job["input"]
     prompt = inp.get("prompt", "")
     temperature = inp.get("temperature", 0.7)
@@ -94,30 +72,31 @@ def handler(job):
 
     try:
         resp = requests.post(
-            f"{OLLAMA_HOST}/api/generate",
+            f"{LLAMA_HOST}/v1/chat/completions",
             json={
-                "model": MODEL_NAME,
-                "prompt": prompt,
+                "model": "norsk-mistral",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": num_predict,
+                "temperature": temperature,
                 "stream": False,
-                "options": {
-                    "temperature": temperature,
-                    "num_predict": num_predict,
-                },
             },
             timeout=300,
         )
 
         if resp.status_code != 200:
             error_text = resp.text[:500]
-            print(f"Ollama error {resp.status_code}: {error_text}")
-            return {"error": f"Ollama {resp.status_code}: {error_text}"}
+            print(f"llama-server error {resp.status_code}: {error_text}")
+            return {"error": f"Server error {resp.status_code}: {error_text}"}
 
         data = resp.json()
+        choice = data.get("choices", [{}])[0]
+        message = choice.get("message", {})
+        usage = data.get("usage", {})
+
         return {
-            "response": data.get("response", ""),
-            "eval_count": data.get("eval_count", 0),
-            "eval_duration": data.get("eval_duration", 0),
-            "total_duration": data.get("total_duration", 0),
+            "response": message.get("content", ""),
+            "eval_count": usage.get("completion_tokens", 0),
+            "total_duration": 0,
         }
     except Exception as e:
         print(f"Handler error: {e}")
