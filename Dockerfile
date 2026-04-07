@@ -3,7 +3,7 @@ FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip curl ca-certificates && \
+    python3 python3-pip curl ca-certificates zstd && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Ollama the same way as on a pod (gets latest version with mistral4 support)
