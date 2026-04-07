@@ -4,7 +4,7 @@ import runpod
 from llama_cpp import Llama
 
 llm = None
-MODEL_PATH = "/workspace/models/norsk-mistral-119b-gguf/m51Lab-NorskMistral-119B-Q4_K_M.gguf"
+MODEL_PATH = "/runpod-volume/models/norsk-mistral-119b-gguf/m51Lab-NorskMistral-119B-Q4_K_M.gguf"
 
 
 def load_model():
